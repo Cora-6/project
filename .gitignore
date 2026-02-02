@@ -1,0 +1,6 @@
+*__pycache__/
+reconstruct/reconstruct_glb
+depth_model/train_nd_with_controlnet/test/
+depth_model/nd_ckpt_diffuser/
+depth_model/super_resolution/
+depth_model/make_data/Houston_blender.obj
