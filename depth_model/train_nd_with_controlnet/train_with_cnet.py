@@ -1335,7 +1335,8 @@ def main(args):
                 # 目标形状: [Batch * Frames, Channels, H, W]
                 bsz = batch["pixel_values"].shape[0] # 获取 Batch Size (例如 4)
                 latents = batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype)
-                latents = latents.view(bsz * NUM_FRAMES, 4, 32, 32) # Flatten
+                H, W = latents.shape[3], latents.shape[4]
+                latents = latents.view(bsz * NUM_FRAMES, 4, H, W) # Flatten
 
                 tim.update_and_log('dont do vae encoding, just use images directly as latents')
 
@@ -1361,7 +1362,15 @@ def main(args):
                 encoder_hidden_states = encoder_hidden_states.repeat_interleave(NUM_FRAMES, dim=0)
 
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                controlnet_image = controlnet_image.view(bsz * NUM_FRAMES, 48, 256, 256)
+                cond_H, cond_W = controlnet_image.shape[3], controlnet_image.shape[4]
+                cond_scale_H, cond_scale_W = H // 32, W // 32
+                controlnet_image = controlnet_image.view(bsz * NUM_FRAMES, 48, cond_H, cond_W)
+                controlnet_image = F.interpolate(
+                    controlnet_image,
+                    size=(cond_scale_H, cond_scale_W),
+                    mode="bilinear",
+                    align_corners=False,
+                )
 
                 tim.update_and_log('data prep')
 
