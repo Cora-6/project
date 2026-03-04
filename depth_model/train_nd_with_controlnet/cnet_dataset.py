@@ -48,16 +48,20 @@ class HSIControlNetDataset(Dataset):
     """
     def __init__(self,
                  root_dir: str,
-                 image_size: int = 512,
+                 image_size: int = 32,
+                 condition_image_scale: int = 8,
                  tokenizer_name: str = "stable-diffusion-v1-5/stable-diffusion-v1-5",):
         self.root_dir   = root_dir
         self.image_size = image_size
+        self.condition_image_scale = condition_image_scale
         self.tokenizer  = AutoTokenizer.from_pretrained(
             tokenizer_name, subfolder="tokenizer", use_fast=False)
         print("dataset name:",root_dir)
         # 1. 收集所有 json（即所有单视角目录）
         jsons = sorted(glob.glob(f"{root_dir}/**/*.json", recursive=True))
+        print('json collected')
         folders = [os.path.dirname(j) for j in jsons]
+        print('folders collected')
         n = len(folders)
         print("folders len",n)
         # 2. 4 个一组
@@ -82,13 +86,13 @@ class HSIControlNetDataset(Dataset):
                                      flags=cv2.INTER_LINEAR,
                                      borderMode=cv2.BORDER_CONSTANT,
                                      borderValue=0)#对齐到topview
-        out_size_per_subimage = image_size // 2
-        scale = out_size_per_subimage / 512 # 512 is the canonical size
-        self.scale_mat = np.array([
-            [scale, 0., 0],
-            [0., scale, 0.],
-            [0., 0., 1.]
-        ])
+        # out_size_per_subimage = image_size // 2
+        # scale = out_size_per_subimage / 512 # 512 is the canonical size
+        # self.scale_mat = np.array([
+        #     [scale, 0., 0],
+        #     [0., scale, 0.],
+        #     [0., 0., 1.]
+        # ])
 
     def __len__(self):
         return len(self.groups)
@@ -96,7 +100,8 @@ class HSIControlNetDataset(Dataset):
     # ---------- 下面 3 个工具函数 -------------
     def _warp_hsi(self, H_mat, out_size):
         """把 (C,H,W) warp 成 (C,out_size,out_size)"""
-        M = self.scale_mat @ H_mat
+        # M = self.scale_mat @ H_mat
+        M = H_mat
         warped = cv2.warpPerspective(self.warped_hsi, M, (out_size, out_size),
                                      flags=cv2.INTER_LINEAR,
                                      borderMode=cv2.BORDER_CONSTANT,
@@ -166,12 +171,12 @@ class HSIControlNetDataset(Dataset):
         folders = self.groups[idx]           # 长度为 4 的列表
         # ---- 1. 读取 Depth+Normal 并堆叠 (Stack) ----
         # 结果维度: (4, 4, 256, 256) -> [Frames, Channels, H, W]
-        imgs_list = [self._process_depth_normal(f, 128) for f in folders]
+        imgs_list = [self._process_depth_normal(f, self.image_size) for f in folders]
         image = np.stack(imgs_list, axis=0) 
         # ---- 2. 处理 HSI 并堆叠 (Stack) ----
         # 之前是拼成 2x2，现在改为在 Batch 维度堆叠以匹配 Image
         Hs = [np.load(os.path.join(f, 'homography_matrix.npy')) for f in folders]
-        warp_hsi_parital_func = partial(self._warp_hsi, out_size=256)
+        warp_hsi_parital_func = partial(self._warp_hsi, out_size=self.image_size*self.condition_image_scale)
         cubes = list(map(warp_hsi_parital_func, Hs)) # List of (48, 256, 256)
         
         cond = np.stack(cubes, axis=0) # (4, 48, 256, 256)
@@ -195,6 +200,8 @@ class HSIControlNetDataset(Dataset):
             cfg['location'] = ((np.array(cfg['location']) - centroid) * 0.01).tolist()
         camera_matrices = [self._get_camera_matrix(cfg).flatten() for cfg in configs]
         camera_matrix = np.stack(camera_matrices, axis=0).astype(np.float32) # (4, 16)
+        #cond shape (4, 48, 512, 512) image shape (4, 4, 64, 64)
+
         return dict(text=text,
                     input_ids=input_ids,
                     image=image,

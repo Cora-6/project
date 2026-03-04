@@ -4,3 +4,4 @@ depth_model/train_nd_with_controlnet/test/
 depth_model/nd_ckpt_diffuser/
 depth_model/super_resolution/
 *.obj
+depth_model/train_nd_with_controlnet/wandb

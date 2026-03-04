@@ -45,6 +45,7 @@ from transformers import AutoTokenizer, PretrainedConfig
 from cnet_dataset import HSIControlNetDataset
 from get_camera import get_camera
 from warp_and_controlnet_model import WarpAndControlNetModel
+from peft import LoraConfig, inject_adapter_in_model
 
 class DebugTimer:
     def __init__(self):
@@ -825,171 +826,6 @@ def parse_args(input_args=None):
     return args
 
 
-def make_train_dataset(args, tokenizer, accelerator):
-    # Get the datasets: you can either provide your own training and evaluation files (see below)
-    # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-    # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-    # download the dataset.
-    if args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir,
-            data_dir=args.train_data_dir,
-            trust_remote_code=True,
-            # writer_batch_size=10,
-        )
-    else:
-        if args.train_data_dir is not None:
-            dataset = load_dataset(
-                args.train_data_dir,
-                cache_dir=args.cache_dir,
-            )
-        # See more about loading custom images at
-        # https://huggingface.co/docs/datasets/v2.0.0/en/dataset_script
-
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
-    column_names = dataset["train"].column_names
-
-    # 6. Get the column names for input/target.
-    if args.image_column is None:
-        image_column = column_names[0]
-        logger.info(f"image column defaulting to {image_column}")
-    else:
-        image_column = args.image_column
-        if image_column not in column_names:
-            raise ValueError(
-                f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    if args.caption_column is None:
-        caption_column = column_names[1]
-        logger.info(f"caption column defaulting to {caption_column}")
-    else:
-        caption_column = args.caption_column
-        if caption_column not in column_names:
-            raise ValueError(
-                f"`--caption_column` value '{args.caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    if args.conditioning_image_column is None:
-        conditioning_image_column = column_names[2]
-        logger.info(f"conditioning image column defaulting to {conditioning_image_column}")
-    else:
-        conditioning_image_column = args.conditioning_image_column
-        if conditioning_image_column not in column_names:
-            raise ValueError(
-                f"`--conditioning_image_column` value '{args.conditioning_image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    def tokenize_captions(examples, is_train=True):
-        captions = []
-        for caption in examples[caption_column]:
-            if random.random() < args.proportion_empty_prompts:
-                captions.append("")
-            elif isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(
-                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                )
-        inputs = tokenizer(
-            captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-        )
-        return inputs.input_ids
-
-    image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
-
-    conditioning_image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            # transforms.ToTensor(),
-        ]
-    )
-
-    def preprocess_train(examples):
-        tim = DebugTimer()
-
-        images = [image.convert("RGB") for image in examples[image_column]]
-        images = [image_transforms(image) for image in images]
-
-        conditioning_images = examples[conditioning_image_column]
-        # cond_images = []
-
-        # tim.update_and_log("preprocess_train() before loop")
-
-        # for cond in conditioning_images:
-        #     try:
-        #         # cond = np.array(cond, dtype=np.uint8)
-        #         cond = cv2.resize(
-        #             np.moveaxis(cond, 0, -1),
-        #             (args.resolution, args.resolution),
-        #             interpolation=cv2.INTER_LINEAR
-        #         )
-        #         cond = np.moveaxis(cond, -1, 0)
-        #         cond_images.append(cond)
-        #     except Exception as e:
-        #         print('#' * 50)
-        #         print('#' * 50)
-        #         print(examples.keys())
-        #         print('#' * 50)
-        #         print(cond.shape)
-        #         print('#' * 50)
-        #         print(e)
-        #         print('#' * 50)
-        #         raise e
-
-        # tim.update_and_log("preprocess_train() before cond_images to np array")
-
-        # cond_images = np.array(cond_images)
-
-        # tim.update_and_log("preprocess_train() before normalization")
-
-        # conditioning_images = torch.tensor(conditioning_images).to(torch.float16) / (255.0 / 2.0) - 1.0
-
-        conditioning_images = torch.tensor(conditioning_images).to(torch.float16)
-
-        examples["pixel_values"] = images
-        examples["conditioning_pixel_values"] = conditioning_images
-        
-        tim.update_and_log("preprocess_train() before tokenization")
-
-        examples["input_ids"] = tokenize_captions(examples)
-
-        tim.update_and_log("preprocess_train()")
-
-        return examples
-
-    with accelerator.main_process_first():
-        try:
-            if args.max_train_samples is not None:
-                dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-            # Set the training transforms
-            train_dataset = dataset["train"].with_transform(preprocess_train)
-        except Exception as e:
-            print('#' * 50)
-            print('#' * 50)
-            print('#' * 50)
-            print(e)
-            raise e
-
-    return train_dataset
-
-
 def collate_fn(examples: List[Dict[str, Any]]):
     """
     input dict (from HSIControlNetDataset):
@@ -998,7 +834,7 @@ def collate_fn(examples: List[Dict[str, Any]]):
         camera_matrix: np.ndarray (Frames, 16)
         input_ids: torch.Tensor
     """
-    pixel_values = torch.tensor(np.stack([ex["image"] for ex in examples], 0))  # (B, F, 4, 32, 32)
+    pixel_values = torch.tensor(np.stack([ex["image"] for ex in examples], 0))  # (B, F, 4, H, W)
     conditioning_pixel_values = torch.tensor(np.stack([ex["conditioning_image"] for ex in examples], 0))  # (B, F, 48, 256, 256)
     camera_matrices = torch.tensor(np.stack([ex["camera_matrix"] for ex in examples], 0))  # (B, F, 16)
     input_ids = torch.stack([ex["input_ids"] for ex in examples])  # (B, seq_len)
@@ -1097,6 +933,11 @@ def main(args):
         logger.info("Initializing controlnet weights from unet")
         controlnet = WarpAndControlNetModel.from_unet(unet,conditioning_channels=48)
 
+    unet_lora_config = LoraConfig(r=8, lora_alpha=8, init_lora_weights="gaussian", target_modules=["to_k_proj", "to_q_proj", "to_v_proj", "to_out.0"])
+    unet = inject_adapter_in_model(unet_lora_config, unet, adapter_name="unet_lora")
+    print("Injected UNet LoRA adapters")
+
+
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
@@ -1191,7 +1032,11 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = controlnet.parameters()
+    params_to_optimize = list(controlnet.parameters())
+    for name, param in unet.named_parameters():
+        if "lora" in name or "conv_out" in name:
+            params_to_optimize.append(param)
+        
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -1230,6 +1075,8 @@ def main(args):
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )
+
+    assert isinstance(controlnet, WarpAndControlNetModel), type(controlnet)
 
     # Prepare everything with our `accelerator`.
     controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -1336,6 +1183,7 @@ def main(args):
                 bsz = batch["pixel_values"].shape[0] # 获取 Batch Size (例如 4)
                 latents = batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype)
                 H, W = latents.shape[3], latents.shape[4]
+                assert H == args.resolution and W == args.resolution, f"Expected image size to be {args.resolution}x{args.resolution}, but got {H}x{W}"
                 latents = latents.view(bsz * NUM_FRAMES, 4, H, W) # Flatten
 
                 tim.update_and_log('dont do vae encoding, just use images directly as latents')
@@ -1361,16 +1209,16 @@ def main(args):
                 # 输出形状: [Batch * 4, 77, 768]
                 encoder_hidden_states = encoder_hidden_states.repeat_interleave(NUM_FRAMES, dim=0)
 
-                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)# torch.Size([8, 4, 48, 512, 512])
                 cond_H, cond_W = controlnet_image.shape[3], controlnet_image.shape[4]
-                cond_scale_H, cond_scale_W = H // 32, W // 32
-                controlnet_image = controlnet_image.view(bsz * NUM_FRAMES, 48, cond_H, cond_W)
-                controlnet_image = F.interpolate(
-                    controlnet_image,
-                    size=(cond_scale_H, cond_scale_W),
-                    mode="bilinear",
-                    align_corners=False,
-                )
+                controlnet_image = controlnet_image.view(bsz * NUM_FRAMES, 48, cond_H, cond_W)# torch.Size([32, 48, 512, 512])
+                assert controlnet_image.shape[2:] == (H*8, W*8), f"Expected controlnet image to be at 8x scale of latents, but got {controlnet_image.shape[2:]} vs {(H*8, W*8)}"
+                # controlnet_image = F.interpolate(
+                #     controlnet_image,
+                #     size=(cond_scale_H, cond_scale_W),
+                #     mode="bilinear",
+                #     align_corners=False,
+                # )
 
                 tim.update_and_log('data prep')
 
@@ -1386,7 +1234,6 @@ def main(args):
                 # Camera matrices from dataset: (B, F, 16) -> (B*F, 16)
                 camera_matrix = batch["camera_matrix"].to(device=accelerator.device, dtype=weight_dtype)
                 camera_matrix = camera_matrix.view(bsz * NUM_FRAMES, 16)
-                
 
                 down_block_res_samples, mid_block_res_sample = controlnet(
                     noisy_latents,
@@ -1489,7 +1336,9 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         controlnet = unwrap_model(controlnet)
-        controlnet.save_pretrained(args.output_dir)
+        controlnet.save_pretrained(f"{args.output_dir}/controlnet")
+        unet = unwrap_model(unet)
+        unet.save_pretrained(f"{args.output_dir}/unet")
 
         # Run a final round of validation.
         image_logs = None
