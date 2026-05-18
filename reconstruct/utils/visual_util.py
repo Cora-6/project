@@ -15,6 +15,39 @@ import os
 import requests
 
 
+def _camera_centers_and_forward_from_extrinsics(extrinsics: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    ext = np.asarray(extrinsics, dtype=np.float32)
+    if ext.ndim != 3:
+        raise ValueError(f"extrinsics ndim error: {ext.shape}")
+
+    if ext.shape[1:] == (3, 4):
+        ext4 = np.tile(np.eye(4, dtype=np.float32), (ext.shape[0], 1, 1))
+        ext4[:, :3, :4] = ext
+    elif ext.shape[1:] == (4, 4):
+        ext4 = ext
+    else:
+        raise ValueError(f"unsupported extrinsics shape: {ext.shape}")
+
+    c2w = np.linalg.inv(ext4)
+    centers = c2w[:, :3, 3]
+    forward = c2w[:, :3, 2]  # OpenCV +Z as forward
+    return centers.astype(np.float32), forward.astype(np.float32)
+
+
+def _should_flip_camera_forward(extrinsics: np.ndarray, point_center: np.ndarray) -> bool:
+    try:
+        centers, forward = _camera_centers_and_forward_from_extrinsics(extrinsics)
+    except Exception:
+        return False
+
+    if centers.size == 0:
+        return False
+
+    to_center = point_center[None, :] - centers
+    dots = np.sum(forward * to_center, axis=1)
+    return float(np.mean(dots)) < 0.0
+
+
 def predictions_to_glb(
     predictions,
     conf_thres=50.0,
@@ -140,6 +173,8 @@ def predictions_to_glb(
         images = images[selected_frame_idx][None]
         camera_matrices = camera_matrices[selected_frame_idx][None]
 
+    pred_world_points = np.nan_to_num(pred_world_points, nan=0.0, posinf=0.0, neginf=0.0)
+    pred_world_points_conf = np.nan_to_num(pred_world_points_conf, nan=0.0, posinf=0.0, neginf=0.0)
     vertices_3d = pred_world_points.reshape(-1, 3)
     # Handle different image formats - check if images need transposing
     if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
@@ -156,6 +191,9 @@ def predictions_to_glb(
         conf_threshold = np.percentile(conf, conf_thres)
 
     conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
+    if not np.any(conf_mask):
+        # 回退：如果置信度全失效，保留全部点，避免空点云
+        conf_mask = conf > -np.inf
 
     if mask_black_bg:
         black_bg_mask = colors_rgb.sum(axis=1) >= 16
@@ -198,7 +236,14 @@ def predictions_to_glb(
     extrinsics_matrices[:, :3, :4] = camera_matrices
     extrinsics_matrices[:, 3, 3] = 1
 
+    flip_camera_forward = False
     if show_cam:
+        try:
+            point_center = vertices_3d.mean(axis=0)
+            flip_camera_forward = _should_flip_camera_forward(camera_matrices, point_center)
+        except Exception:
+            flip_camera_forward = False
+
         # Add camera models to the scene
         for i in range(num_cameras):
             world_to_camera = extrinsics_matrices[i]
@@ -206,7 +251,13 @@ def predictions_to_glb(
             rgba_color = colormap(i / num_cameras)
             current_color = tuple(int(255 * x) for x in rgba_color[:3])
 
-            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
+            integrate_camera_into_scene(
+                scene_3d,
+                camera_to_world,
+                current_color,
+                scene_scale,
+                forward_flip=flip_camera_forward,
+            )
 
     # Align scene to the observation of the first camera
     # scene_3d = apply_scene_alignment(scene_3d, extrinsics_matrices)
@@ -215,7 +266,13 @@ def predictions_to_glb(
     return scene_3d
 
 
-def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
+def integrate_camera_into_scene(
+    scene: trimesh.Scene,
+    transform: np.ndarray,
+    face_colors: tuple,
+    scene_scale: float,
+    forward_flip: bool = False,
+):
     """
     Integrates a fake camera mesh into the 3D scene.
 
@@ -235,8 +292,11 @@ def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, fac
     rot_45_degree[2, 3] = -cam_height
 
     opengl_transform = get_opengl_conversion_matrix()
+    forward_fix = np.eye(4)
+    if forward_flip:
+        forward_fix[:3, :3] = Rotation.from_euler("y", 180, degrees=True).as_matrix()
     # Combine transformations
-    complete_transform = transform @ opengl_transform @ rot_45_degree
+    complete_transform = transform @ opengl_transform @ forward_fix @ rot_45_degree
     camera_cone_shape = trimesh.creation.cone(cam_width, cam_height, sections=4)
 
     # Generate mesh for the camera
