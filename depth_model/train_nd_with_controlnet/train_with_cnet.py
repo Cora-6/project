@@ -846,6 +846,20 @@ def collate_fn(examples: List[Dict[str, Any]]):
         "input_ids": input_ids,
     }
 
+def _load_unet_state_dict_from_pretrained_dir(unet_dir: str):
+    safetensors_path = os.path.join(unet_dir, "diffusion_pytorch_model.safetensors")
+    bin_path = os.path.join(unet_dir, "diffusion_pytorch_model.bin")
+
+    if os.path.isfile(safetensors_path):
+        from safetensors.torch import load_file as safe_load_file
+
+        return safe_load_file(safetensors_path)
+    if os.path.isfile(bin_path):
+        return torch.load(bin_path, map_location="cpu")
+
+    raise FileNotFoundError(
+        f"No UNet weight file found in {unet_dir}. Expected diffusion_pytorch_model.safetensors or diffusion_pytorch_model.bin"
+    )
 
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
@@ -915,6 +929,8 @@ def main(args):
     text_encoder = text_encoder_cls.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
     )
+    text_encoder.requires_grad_(False)
+
     # vae = AutoencoderKL.from_pretrained(
     #     args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
     # )
@@ -923,8 +939,9 @@ def main(args):
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
     )
     unet = NewUNet2DConditionModel(**temp_unet.config, camera_dim=16)
-    state_dict = torch.load("/home/viplab/liukejia/normal-depth-diffusion/diffusers_nd/py/nd_mv_unet.pth", map_location="cpu")
+    state_dict = torch.load("/home/user/mc45081/project/depth_model/nd_ckpt_diffuser/nd_mv_ema_diffuser.pth", map_location="cpu")
     unet.load_state_dict(state_dict, strict=True)
+    unet.requires_grad_(False)
 
     if args.controlnet_model_name_or_path:
         logger.info("Loading existing controlnet weights")
@@ -933,10 +950,10 @@ def main(args):
         logger.info("Initializing controlnet weights from unet")
         controlnet = WarpAndControlNetModel.from_unet(unet,conditioning_channels=48)
 
+    #add lora 
     unet_lora_config = LoraConfig(r=8, lora_alpha=8, init_lora_weights="gaussian", target_modules=["to_k_proj", "to_q_proj", "to_v_proj", "to_out.0"])
-    unet = inject_adapter_in_model(unet_lora_config, unet, adapter_name="unet_lora")
+    unet.add_adapter(unet_lora_config, adapter_name="unet_lora")
     print("Injected UNet LoRA adapters")
-
 
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
@@ -975,9 +992,6 @@ def main(args):
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # vae.requires_grad_(False)
-    unet.requires_grad_(False)
-    text_encoder.requires_grad_(False)
     controlnet.train()
 
     if args.enable_xformers_memory_efficient_attention:
@@ -1130,14 +1144,20 @@ def main(args):
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
+        checkpoint_dir = None
         if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
+            checkpoint_dir = args.resume_from_checkpoint
+            if not os.path.isabs(checkpoint_dir):
+                checkpoint_dir = os.path.join(args.output_dir, checkpoint_dir)
+            path = os.path.basename(os.path.normpath(checkpoint_dir))
         else:
             # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
+            if path is not None:
+                checkpoint_dir = os.path.join(args.output_dir, path)
 
         if path is None:
             accelerator.print(
@@ -1147,7 +1167,33 @@ def main(args):
             initial_global_step = 0
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
+            unet_ckpt_dir = os.path.join(checkpoint_dir, "unet")
+            if os.path.isdir(unet_ckpt_dir):
+                logger.info(f"Loading UNet state_dict (with LoRA) from {unet_ckpt_dir}")
+                unet_state_dict = _load_unet_state_dict_from_pretrained_dir(unet_ckpt_dir)
+                incompatible_keys = unet.load_state_dict(unet_state_dict, strict=False)
+
+                missing_trainable_keys = [
+                    k for k in incompatible_keys.missing_keys if ("lora" in k or "conv_out" in k)
+                ]
+                if len(missing_trainable_keys) > 0:
+                    raise ValueError(
+                        "UNet resume failed: missing trainable keys (LoRA/conv_out): "
+                        + ", ".join(missing_trainable_keys[:20])
+                    )
+
+                if len(incompatible_keys.unexpected_keys) > 0:
+                    logger.warning(
+                        f"UNet resume has unexpected keys (showing up to 20): {incompatible_keys.unexpected_keys[:20]}"
+                    )
+
+                del unet_state_dict
+            else:
+                logger.warning(
+                    f"UNet checkpoint not found at {unet_ckpt_dir}. "
+                    "Will keep current UNet initialization."
+                )
+            accelerator.load_state(checkpoint_dir)
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
@@ -1308,6 +1354,8 @@ def main(args):
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
+                        unet = unwrap_model(unet)
+                        unet.save_pretrained(f"{save_path}/unet")
                         logger.info(f"Saved state to {save_path}")
 
                     if args.validation_prompt is not None and global_step % args.validation_steps == 0:

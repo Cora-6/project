@@ -7,6 +7,7 @@ export WANDB_API_KEY=wandb_v1_Ui0KFJZg53HVpCoFMjaIjSzjLHD_OF0t9ZZ3oh11iczOqQ00Q8
 
 export CUDA_VISIBLE_DEVICES=0
 accelerate launch train_with_cnet.py \
+ --checkpointing_steps=3000 \
  --mixed_precision="fp16" \
  --pretrained_model_name_or_path=$MODEL_DIR \
  --output_dir=$OUTPUT_DIR \
