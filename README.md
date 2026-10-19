@@ -67,3 +67,17 @@ external storage and document their paths locally.
 This is research code. Several entry points contain absolute paths inherited from
 the original experiment environment; update them for a different machine. The
 `backup/pre-cleanup-20261019` branch preserves the pre-cleanup code snapshot.
+
+## Shared multi-view training architecture
+
+The three experiment directories now use one implementation in
+`mv_model_common/`:
+
+- `conditioning_mode=hsi`, `controlnet_type=warp`: main model.
+- `conditioning_mode=hsi`, `controlnet_type=standard`: no-deformable ablation.
+- `conditioning_mode=rgb`, `controlnet_type=warp`: no-HSI ablation.
+
+The original Python and shell entry-point paths remain as compatibility wrappers,
+so existing commands and notebooks do not need to change. New shared behavior
+should be implemented once in `mv_model_common/`; experiment directories should
+only contain variant-specific notebooks and launcher defaults.
