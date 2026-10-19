@@ -1,10 +1,66 @@
-*__pycache__/
-reconstruct/reconstruct_glb
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Experiment tracking and caches
+wandb/
+**/wandb/
+.cache/
+runs/
+outputs/
+logs/
+
+# Generated results
+result*/
+results*/
+**/results*/
+**/test_result/
+**/reconstruct_glb*/
+**/render_3d_stitched*/
+inference/
+
+# Datasets and numerical artifacts
+data/
+datasets/
+*.npy
+*.npz
+*.mat
+*.csv
+
+# Models and 3D artifacts
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.obj
+*.glb
+*.ply
+
+# Existing project-specific generated directories
 depth_model/train_nd_with_controlnet/test/
 depth_model/nd_ckpt_diffuser/
 depth_model/super_resolution/
-*.obj
-*wandb/
-*test_result/
-/result*
-data_processing
+data_processing/
+
+# Local upstream checkout and legacy artifacts
+/vggt/
+* copy.ipynb
+houston/vggt_output/
+metric/txt/
+muufl_target001_sideview_outputs*/
+* (1).ipynb
