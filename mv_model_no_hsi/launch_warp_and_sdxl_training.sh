@@ -1,9 +1,10 @@
 export MODEL_DIR="hotshotco/SDXL-512" #"stabilityai/stable-diffusion-xl-base-1.0"
 export OUTPUT_DIR="/data/mv_model_no_hsi_0_with_drop"
-export WANDB_API_KEY=3eac3a8effee6e20659c4fe6c936861e0b44e7f2
+: "${WANDB_API_KEY:?Set WANDB_API_KEY in the environment before running this script}"
 
-export CUDA_VISIBLE_DEVICES=0
-accelerate launch train_controlnet_sdxl_warp.py\
+export CUDA_VISIBLE_DEVICES=1
+accelerate launch --gpu_ids 1 train_controlnet_sdxl_warp.py\
+ --checkpointing_steps=2500 \
  --pretrained_model_name_or_path=$MODEL_DIR \
  --output_dir=$OUTPUT_DIR \
  --dataset_name="/data/train" \

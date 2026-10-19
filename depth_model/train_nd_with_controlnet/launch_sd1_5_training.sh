@@ -2,7 +2,7 @@
 
 export MODEL_DIR="stable-diffusion-v1-5/stable-diffusion-v1-5"
 export OUTPUT_DIR="/data/nd_model_7_lora"
-export WANDB_API_KEY=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
+: "${WANDB_API_KEY:?Set WANDB_API_KEY in the environment before running this script}"
 
 
 export CUDA_VISIBLE_DEVICES=0
